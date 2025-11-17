@@ -1,9 +1,8 @@
-// api/generate.js
+// api/generate.js (debug version) — deploy to Vercel
 import { createClient } from '@supabase/supabase-js';
 
 const ALLOW_HEADERS = 'Content-Type, Authorization';
 const ALLOW_METHODS = 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS';
-
 function corsHeaders(origin) {
   const allowed = process.env.ALLOWED_ORIGIN || '*';
   const allowOrigin = allowed === '*' ? '*' : (origin || allowed);
@@ -11,69 +10,74 @@ function corsHeaders(origin) {
     'Access-Control-Allow-Origin': allowOrigin,
     'Access-Control-Allow-Headers': ALLOW_HEADERS,
     'Access-Control-Allow-Methods': ALLOW_METHODS,
-    // needed for some browsers to expose response body to JS
     'Access-Control-Allow-Credentials': 'true',
   };
 }
 
 export default async function handler(req, res) {
-  try {
-    const origin = req.headers.origin || req.headers.referer || '';
-    const ch = corsHeaders(origin);
+  const origin = req.headers.origin || req.headers.referer || '';
+  const ch = corsHeaders(origin);
 
-    // Handle preflight
+  try {
+    // quick env dump (masked) for debugging
+    const env = {
+      SUPABASE_URL: !!process.env.SUPABASE_URL,
+      SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+      HOST_SECRET: !!process.env.HOST_SECRET,
+      ALLOWED_ORIGIN: process.env.ALLOWED_ORIGIN ?? null
+    };
+
+    // OPTIONS preflight
     if (req.method === 'OPTIONS') {
-      res.writeHead(204, {
-        ...ch,
-        'Content-Type': 'text/plain'
-      });
+      res.writeHead(204, { ...ch, 'Content-Type': 'text/plain' });
       return res.end('');
     }
 
-    // Only accept POST for generation
     if (req.method !== 'POST') {
       res.writeHead(405, { ...ch, 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'Method not allowed' }));
+      return res.end(JSON.stringify({ ok: false, error: 'Method not allowed' }));
     }
 
-    // Parse body
     const { host_secret, family_code } = req.body || {};
     if (!host_secret || !family_code) {
       res.writeHead(400, { ...ch, 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'Missing host_secret or family_code' }));
+      return res.end(JSON.stringify({ ok: false, error: 'Missing host_secret or family_code' }));
     }
 
-    const HOST_SECRET = process.env.HOST_SECRET;
-    if (!HOST_SECRET || host_secret !== HOST_SECRET) {
+    if (host_secret !== process.env.HOST_SECRET) {
       res.writeHead(403, { ...ch, 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'Invalid host secret' }));
+      return res.end(JSON.stringify({ ok: false, error: 'Invalid host secret' }));
     }
 
-    const SUPABASE_URL = process.env.SUPABASE_URL;
-    const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
+    if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
       res.writeHead(500, { ...ch, 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'Missing supabase config' }));
+      return res.end(JSON.stringify({ ok: false, error: 'Missing SUPABASE_URL or SERVICE_ROLE_KEY in env', env }));
     }
 
-    const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
+    // create client
+    let supabase;
+    try {
+      supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+    } catch (e) {
+      console.error('createClient error', e);
+      res.writeHead(500, { ...ch, 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: false, error: 'createClient failed', detail: String(e), env }));
+    }
 
+    // call RPC
     const { data, error } = await supabase.rpc('generate_assignments_for_family', { in_family_code: family_code });
 
     if (error) {
-      // return safe error to client
-      console.error('RPC error:', error);
+      console.error('RPC returned error object:', error);
       res.writeHead(500, { ...ch, 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ error: 'Generation failed', detail: error.message || error }));
+      return res.end(JSON.stringify({ ok: false, error: 'RPC error', detail: error }));
     }
 
     res.writeHead(200, { ...ch, 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ message: data || 'generated' }));
+    return res.end(JSON.stringify({ ok: true, message: data || 'generated', env }));
   } catch (err) {
-    console.error('Unhandled exception in /api/generate:', err);
-    const origin = req?.headers?.origin || req?.headers?.referer || '';
-    const ch = corsHeaders(origin);
+    console.error('Unhandled exception:', err);
     res.writeHead(500, { ...ch, 'Content-Type': 'application/json' });
-    return res.end(JSON.stringify({ error: 'Server error', message: String(err) }));
+    return res.end(JSON.stringify({ ok: false, error: 'Unhandled exception', message: String(err), stack: err?.stack }));
   }
 }
